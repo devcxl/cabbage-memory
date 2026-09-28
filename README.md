@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/@devcxl/cabbage-memory)](https://www.npmjs.com/package/@devcxl/cabbage-memory)
 [![npm downloads](https://img.shields.io/npm/dm/@devcxl/cabbage-memory)](https://www.npmjs.com/package/@devcxl/cabbage-memory)
 [![license](https://img.shields.io/npm/l/@devcxl/cabbage-memory)](./LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/devcxl/opencode-memory/ci.yml?branch=main)](https://github.com/devcxl/opencode-memory/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/devcxl/cabbage-memory/ci.yml?branch=main)](https://github.com/devcxl/cabbage-memory/actions)
 
 [English](./README.md) | [中文](./README.zh.md)
 
@@ -25,7 +25,7 @@ Remote memory system on Cloudflare Workers (D1 + Vectorize) for OpenCode plugins
 ## Repository Layout
 
 ```
-opencode-memory/
+cabbage-memory/
 ├── apps/
 │   ├── api/            # Cloudflare Worker: REST + MCP + OAuth + cron
 │   ├── plugin/         # @devcxl/cabbage-memory  OpenCode plugin (remote-only)
@@ -108,8 +108,8 @@ Tools: `memory_add` / `memory_search` / `memory_get` / `memory_update` / `memory
 The [pi coding agent](https://pi.dev/) does not support MCP (by design), so it uses a native TypeScript extension (see [apps/pi-extension](./apps/pi-extension/README.md)):
 
 ```bash
-git clone https://github.com/devcxl/opencode-memory.git
-pi -e ./opencode-memory/apps/pi-extension/src/extension.ts
+git clone https://github.com/devcxl/cabbage-memory.git
+pi -e ./cabbage-memory/apps/pi-extension/src/extension.ts
 
 export OPM_API_URL="https://<worker-url>"
 export OPM_API_KEY="opm_xxx"

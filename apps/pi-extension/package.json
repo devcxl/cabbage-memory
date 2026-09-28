@@ -1,7 +1,7 @@
 {
   "name": "@devcxl/cabbage-memory-pi",
   "version": "2.0.0",
-  "description": "pi coding agent extension for opencode-memory — remote memory on Cloudflare Workers (D1 + Vectorize)",
+  "description": "pi coding agent extension for cabbage-memory — remote memory on Cloudflare Workers (D1 + Vectorize)",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -17,7 +17,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/devcxl/opencode-memory.git",
+    "url": "https://github.com/devcxl/cabbage-memory.git",
     "directory": "apps/pi-extension"
   },
   "publishConfig": {

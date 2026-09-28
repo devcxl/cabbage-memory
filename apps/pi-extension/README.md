@@ -1,6 +1,6 @@
 # @devcxl/cabbage-memory-pi
 
-[pi coding agent](https://pi.dev/) 的原生记忆扩展，接入 [opencode-memory](https://github.com/devcxl/opencode-memory) 远程记忆服务（Cloudflare Workers + D1 + Vectorize）。
+[pi coding agent](https://pi.dev/) 的原生记忆扩展，接入 [cabbage-memory](https://github.com/devcxl/cabbage-memory) 远程记忆服务（Cloudflare Workers + D1 + Vectorize）。
 
 > pi 不支持 MCP（官方设计决策，见 [作者说明](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/)），因此以原生 TypeScript 扩展接入。
 
@@ -12,22 +12,22 @@
 
 ## 安装
 
-前置条件：已部署 opencode-memory Worker，并在 Web 管理台个人中心生成 API Token。
+前置条件：已部署 cabbage-memory Worker，并在 Web 管理台个人中心生成 API Token。
 
 方式一（推荐）：从仓库源码直接加载
 
 ```bash
-git clone https://github.com/devcxl/opencode-memory.git
-pi -e ./opencode-memory/apps/pi-extension/src/extension.ts
+git clone https://github.com/devcxl/cabbage-memory.git
+pi -e ./cabbage-memory/apps/pi-extension/src/extension.ts
 ```
 
 方式二：复制到全局扩展目录（在扩展目录里解析依赖）
 
 ```bash
-mkdir -p ~/.pi/agent/extensions/opencode-memory
-cp -r apps/pi-extension/src ~/.pi/agent/extensions/opencode-memory/
-cp apps/pi-extension/package.json ~/.pi/agent/extensions/opencode-memory/
-cd ~/.pi/agent/extensions/opencode-memory && npm install
+mkdir -p ~/.pi/agent/extensions/cabbage-memory
+cp -r apps/pi-extension/src ~/.pi/agent/extensions/cabbage-memory/
+cp apps/pi-extension/package.json ~/.pi/agent/extensions/cabbage-memory/
+cd ~/.pi/agent/extensions/cabbage-memory && npm install
 ```
 
 ## 配置

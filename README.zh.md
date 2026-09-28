@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/@devcxl/cabbage-memory)](https://www.npmjs.com/package/@devcxl/cabbage-memory)
 [![npm downloads](https://img.shields.io/npm/dm/@devcxl/cabbage-memory)](https://www.npmjs.com/package/@devcxl/cabbage-memory)
 [![license](https://img.shields.io/npm/l/@devcxl/cabbage-memory)](./LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/devcxl/opencode-memory/ci.yml?branch=main)](https://github.com/devcxl/opencode-memory/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/devcxl/cabbage-memory/ci.yml?branch=main)](https://github.com/devcxl/cabbage-memory/actions)
 
 [English](./README.md) | [中文](./README.zh.md)
 
@@ -25,7 +25,7 @@
 ## 仓库结构
 
 ```
-opencode-memory/
+cabbage-memory/
 ├── apps/
 │   ├── api/            # Cloudflare Worker：REST + MCP + OAuth + cron
 │   ├── plugin/         # @devcxl/cabbage-memory  OpenCode 插件（纯远程模式）
@@ -108,8 +108,8 @@ claude mcp add --transport http memory https://<worker-url>/mcp --header "Author
 [pi coding agent](https://pi.dev/) 不支持 MCP（官方设计决策），使用原生 TypeScript 扩展接入（见 [apps/pi-extension](./apps/pi-extension/README.md)）：
 
 ```bash
-git clone https://github.com/devcxl/opencode-memory.git
-pi -e ./opencode-memory/apps/pi-extension/src/extension.ts
+git clone https://github.com/devcxl/cabbage-memory.git
+pi -e ./cabbage-memory/apps/pi-extension/src/extension.ts
 
 export OPM_API_URL="https://<worker-url>"
 export OPM_API_KEY="opm_xxx"
