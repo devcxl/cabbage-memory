@@ -20,7 +20,7 @@
 - **每日总结**：每天北京时间 04:00（UTC 20:00）自动把昨天的 daily 日志总结成一条事实记忆（digest），幂等可补跑
 - **记忆新陈代谢**：fact 写入后由 LLM 异步判定重复/推翻/矛盾，被推翻的旧事实自动退役
 - **认证**：Web 管理台 GitHub OAuth2 登录；插件与 MCP 使用个人中心生成的 API Token（仅存哈希）
-- **接入**：OpenCode 原生插件（含上下文注入）/ MCP Streamable HTTP（`/mcp`，6 个工具）/ REST API
+- **接入**：OpenCode 原生插件（含上下文注入）/ MCP Streamable HTTP（`/mcp`，7 个工具）/ REST API
 
 ## 仓库结构
 
@@ -38,10 +38,14 @@ opencode-memory/
 
 ## 部署与迁移（v1 → v2）
 
+Wrangler 命令需在 `apps/api` 下执行（`wrangler.toml` 所在目录）。
+
 1. 应用数据库迁移并部署：
 
    ```bash
+   cd apps/api
    wrangler d1 migrations apply memory-db --remote
+   cd ../..
    pnpm --filter @devcxl/cabbage-memory-web build
    pnpm deploy:api
    ```
@@ -49,17 +53,25 @@ opencode-memory/
 2. 配置 secrets 并注册 GitHub OAuth App（回调地址 `<worker-url>/auth/github/callback`）：
 
    ```bash
+   cd apps/api
    wrangler secret put JWT_SECRET
    wrangler secret put GITHUB_CLIENT_ID
    wrangler secret put GITHUB_CLIENT_SECRET
+   # 迁移旧数据时必需（/api/admin/remap-user 鉴权）
+   wrangler secret put ADMIN_SECRET
    ```
 
-   可选：在 `wrangler.toml` 的 `OAUTH_ALLOWLIST` 填入允许登录的 GitHub id/login；留空则首个登录者认领实例。
+   可选：在 `apps/api/wrangler.toml` 的 `OAUTH_ALLOWLIST` 填入允许登录的 GitHub id/login；留空则首个登录者认领实例。
 
-3. 首次 GitHub 登录后，在 Web 个人中心生成 API Token，然后迁移旧数据归属并重建向量索引：
+3. 首次 GitHub 登录后，在 Web 个人中心生成 API Token，然后迁移旧数据归属并重建向量索引（`--admin-secret` 必须与 Worker 的 `ADMIN_SECRET` 一致）：
 
    ```bash
-   npx tsx scripts/migrate-v2.ts --url https://<worker-url> --token opm_xxx --old-user-id <旧JWT sub> --force-reindex
+   npx tsx scripts/migrate-v2.ts \
+     --url https://<worker-url> \
+     --token opm_xxx \
+     --old-user-id <旧JWT sub> \
+     --admin-secret <ADMIN_SECRET> \
+     --force-reindex
    ```
 
 ## 插件配置
@@ -89,7 +101,7 @@ Streamable HTTP 端点：`<worker-url>/mcp`，认证使用 API Token：
 claude mcp add --transport http memory https://<worker-url>/mcp --header "Authorization: Bearer opm_xxx"
 ```
 
-工具：`memory_add` / `memory_search` / `memory_get` / `memory_update` / `memory_delete` / `memory_context`。
+工具：`memory_add` / `memory_search` / `memory_get` / `memory_update` / `memory_delete` / `memory_context` / `memory_digest_status`。
 
 ## pi 接入
 

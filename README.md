@@ -38,10 +38,14 @@ opencode-memory/
 
 ## Deploy & Migrate (v1 → v2)
 
+Run Wrangler commands from `apps/api`, where `wrangler.toml` lives.
+
 1. Apply migrations and deploy:
 
    ```bash
+   cd apps/api
    wrangler d1 migrations apply memory-db --remote
+   cd ../..
    pnpm --filter @devcxl/cabbage-memory-web build
    pnpm deploy:api
    ```
@@ -49,17 +53,25 @@ opencode-memory/
 2. Set secrets and register a GitHub OAuth App (callback `<worker-url>/auth/github/callback`):
 
    ```bash
+   cd apps/api
    wrangler secret put JWT_SECRET
    wrangler secret put GITHUB_CLIENT_ID
    wrangler secret put GITHUB_CLIENT_SECRET
+   # Required for legacy data remap (`/api/admin/remap-user`)
+   wrangler secret put ADMIN_SECRET
    ```
 
-   Optional: set `OAUTH_ALLOWLIST` in `wrangler.toml` to a comma-separated list of GitHub ids/logins; when empty, only the first login can claim the instance.
+   Optional: set `OAUTH_ALLOWLIST` in `apps/api/wrangler.toml` to a comma-separated list of GitHub ids/logins; when empty, only the first login can claim the instance.
 
-3. After the first GitHub login, generate an API token in the web console, then remap legacy data and rebuild the vector index:
+3. After the first GitHub login, generate an API token in the web console, then remap legacy data and rebuild the vector index (`--admin-secret` must match the `ADMIN_SECRET` Worker secret):
 
    ```bash
-   npx tsx scripts/migrate-v2.ts --url https://<worker-url> --token opm_xxx --old-user-id <legacy JWT sub> --force-reindex
+   npx tsx scripts/migrate-v2.ts \
+     --url https://<worker-url> \
+     --token opm_xxx \
+     --old-user-id <legacy JWT sub> \
+     --admin-secret <ADMIN_SECRET> \
+     --force-reindex
    ```
 
 ## Plugin Setup
