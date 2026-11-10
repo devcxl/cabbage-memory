@@ -42,6 +42,8 @@ export function createMockEnv(opts: {
   vectorMatches?: MockVectorMatch[]
   entityRows?: Array<{ memory_id: string; key: string; value: string }>
   llmResponse?: unknown
+  /** 自定义 SQL 路由；返回 undefined 时走默认路由 */
+  queryHandler?: (sql: string, args: unknown[]) => unknown[] | undefined
 }) {
   const {
     ftsAndRows = [],
@@ -74,6 +76,9 @@ export function createMockEnv(opts: {
   }
 
   function routeQuery(sql: string, args: unknown[]): unknown[] {
+    const custom = opts.queryHandler?.(sql, args)
+    if (custom !== undefined) return custom
+
     if (sql.includes('FROM memory_entities')) {
       const key = args[1] as string
       const value = args[2] as string
@@ -82,7 +87,15 @@ export function createMockEnv(opts: {
     if (sql.includes('FROM memories_fts')) {
       const matchExpr = String(args[0])
       // AND 模式：全文匹配表达式以 AND 连接
-      return matchExpr.includes(' AND ') ? ftsAndRows : ftsOrRows
+      const rows = matchExpr.includes(' AND ') ? ftsAndRows : ftsOrRows
+      // 模拟 SQL 在 FTS 查询内过滤 archived 的行为
+      if (sql.includes('archived = 0')) {
+        return rows.filter((r) => {
+          const record = records.find((x) => x.id === r.id)
+          return !record || record.archived === 0
+        })
+      }
+      return rows
     }
     if (sql.includes('FROM memories') && sql.includes('id IN')) {
       const ids = (args as string[]).slice(0, args.length - 1)

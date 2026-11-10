@@ -126,10 +126,14 @@ async function ftsQuery(
   const bindings: Array<string | number> = [matchExpr, args.userId]
   let sql = `SELECT id, snippet(memories_fts, 0, '<b>', '</b>', '...', 40) AS snippet, bm25(memories_fts) AS rank
              FROM memories_fts WHERE memories_fts MATCH ? AND user_id = ?`
+  // 过滤必须在 LIMIT 之前完成：归档记录不能占用 topK 名额
+  sql += ' AND id IN (SELECT id FROM memories WHERE user_id = ? AND archived = 0'
+  bindings.push(args.userId)
   if (args.type) {
-    sql += ' AND id IN (SELECT id FROM memories WHERE type = ?)'
+    sql += ' AND type = ?'
     bindings.push(args.type)
   }
+  sql += ')'
   sql += ' ORDER BY rank ASC LIMIT ?'
   bindings.push(args.limit)
 
@@ -155,18 +159,25 @@ export async function vectorCandidateIds(
 ): Promise<string[]> {
   if (!env.AI || !env.VEC) return []
 
-  const embedding = await runAIWithTimeout<{ data: number[][] }>(env.AI, EMBEDDING_MODEL, { text: args.query })
+  try {
+    const embedding = await runAIWithTimeout<{ data: number[][] }>(env.AI, EMBEDDING_MODEL, {
+      text: args.query,
+    })
 
-  const filter: Record<string, string> = { user_id: args.userId }
-  if (args.type) filter.type = args.type
-  if (args.projectId) filter.project_id = args.projectId
+    const filter: Record<string, string> = { user_id: args.userId }
+    if (args.type) filter.type = args.type
+    if (args.projectId) filter.project_id = args.projectId
 
-  const response = await env.VEC.query(embedding.data[0], {
-    topK: Math.min(args.topK, MAX_VECTOR_TOP_K),
-    filter,
-    returnMetadata: 'none',
-  })
-  return ((response.matches || []) as VectorMatch[]).map((m) => m.id)
+    const response = await env.VEC.query(embedding.data[0], {
+      topK: Math.min(args.topK, MAX_VECTOR_TOP_K),
+      filter,
+      returnMetadata: 'none',
+    })
+    return ((response.matches || []) as VectorMatch[]).map((m) => m.id)
+  } catch (error) {
+    console.error('[vector] query failed:', error instanceof Error ? error.message : error)
+    return []
+  }
 }
 
 /** 仅向量召回的候选记录（fact 后处理查重/矛盾检测用） */

@@ -106,3 +106,53 @@ test('archived 记录不会出现在搜索结果中', async () => {
   const results = await searchMemories(env, { query: '华北销售额', userId: 'u-1', topK: 5 })
   assert.equal(results.length, 0)
 })
+
+test('H3：归档记录不会占用 topK 名额', async () => {
+  const archived = makeRecord({ id: 'r-archived', archived: 1, content: '华北销售额 100 万' })
+  const valid = makeRecord({ id: 'r-valid', content: '华北销售额 90 万' })
+  const env = createMockEnv({
+    ftsAndRows: [
+      { id: 'r-archived', snippet: '华北销售额', rank: -2 },
+      { id: 'r-valid', snippet: '华北销售额', rank: -1 },
+    ],
+    ftsOrRows: [],
+    records: [archived, valid],
+    vectorMatches: [],
+  })
+
+  const results = await searchMemories(env, { query: '华北销售额', userId: 'u-1', topK: 1 })
+  assert.equal(results.length, 1)
+  assert.equal(results[0].id, 'r-valid')
+})
+
+test('H4：embedding 失败时降级为仅 FTS', async () => {
+  const env = createMockEnv({
+    ftsAndRows: [{ id: 'r-huabei', snippet: '华北销售额', rank: -1 }],
+    ftsOrRows: [],
+    records: [huabei],
+    vectorMatches: [],
+  })
+  ;(env.AI as unknown as { run: () => Promise<never> }).run = async () => {
+    throw new Error('embedding down')
+  }
+
+  const results = await searchMemories(env, { query: '华北销售额', userId: 'u-1', topK: 5 })
+  assert.equal(results.length, 1)
+  assert.equal(results[0].id, 'r-huabei')
+})
+
+test('H4：Vectorize 查询失败时降级为仅 FTS', async () => {
+  const env = createMockEnv({
+    ftsAndRows: [{ id: 'r-huabei', snippet: '华北销售额', rank: -1 }],
+    ftsOrRows: [],
+    records: [huabei],
+    vectorMatches: [],
+  })
+  ;(env.VEC as unknown as { query: () => Promise<never> }).query = async () => {
+    throw new Error('vectorize down')
+  }
+
+  const results = await searchMemories(env, { query: '华北销售额', userId: 'u-1', topK: 5 })
+  assert.equal(results.length, 1)
+  assert.equal(results[0].id, 'r-huabei')
+})
