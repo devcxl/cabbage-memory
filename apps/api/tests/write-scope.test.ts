@@ -145,3 +145,39 @@ test("C2 updateMemory：全局记录改为项目时 scope 归一", async () => {
   assert.equal(updates[0][4], "proj-b");
   assert.equal(updates[0][5], "project");
 });
+
+test('C2 createMemory：global 写入的向量元数据 project_id 也为空', async () => {
+  const { env } = createWriteEnv()
+  const upserts: Array<{ id: string; metadata: Record<string, string | number> }> = []
+  const waits: Promise<unknown>[] = []
+  const envWithVector = {
+    ...env,
+    AI: {
+      async run() {
+        return { data: [[0.1]] }
+      },
+    },
+    VEC: {
+      async upsert(items: Array<{ id: string; metadata: Record<string, string | number> }>) {
+        upserts.push(...items)
+      },
+    },
+  } as unknown as Env
+
+  await createMemory(
+    envWithVector,
+    'u-1',
+    {
+      type: 'instruction',
+      subtype: 'rule',
+      content: '全局规则',
+      scope: 'global',
+      project_id: 'proj-a',
+    },
+    { waitUntil: (promise) => waits.push(promise) },
+  )
+  await Promise.all(waits)
+
+  assert.equal(upserts.length, 1)
+  assert.equal(upserts[0].metadata.project_id, '')
+})

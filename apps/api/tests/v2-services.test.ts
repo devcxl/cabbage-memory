@@ -211,6 +211,15 @@ function createDigestEnv(existing: MemoryRecord[], opts: { llmError?: boolean } 
       if (limit !== undefined) result = result.slice(0, limit)
       return result
     }
+    if (sql.includes("type = 'digest'") && sql.includes('archived = 1') && sql.includes('digest_attempts')) {
+      const [userId, projectId, date, maxAttempts] = args as unknown[]
+      return rows.filter((r) => {
+        if (r.type !== 'digest' || r.user_id !== userId || r.project_id !== projectId || r.date !== date) return false
+        if (r.archived !== 1 || r.content !== '') return false
+        const meta = JSON.parse(r.meta || '{}') as { digest_attempts?: number }
+        return (meta.digest_attempts || 0) >= (maxAttempts as number)
+      })
+    }
     if (sql.includes("type = 'digest'") && sql.includes("content = ''") && sql.includes('SELECT user_id, project_id, date')) {
       return rows.filter((r) => r.type === 'digest' && r.content === '' && r.archived === 0)
     }
@@ -510,18 +519,25 @@ test('digest：占位连续失败达到上限后归档', async () => {
     meta: JSON.stringify({ digest_attempts: DIGEST_MAX_ATTEMPTS - 1 }),
   })
   const daily = makeRecord({ id: 'd-1', type: 'daily', date, content: '日志' })
-  const { env, rows } = createDigestEnv([pending, daily], { llmError: true })
+  const { env, rows, llmCalls } = createDigestEnv([pending, daily], { llmError: true })
 
   // targetDate 指向另一天，避免同一 daily 在补扫阶段再次触发
   const result = await runDailyDigest(env, undefined, '2026-09-02')
   assert.equal(result.processed, 0)
   assert.equal(result.failed, 1)
+  assert.equal(llmCalls.length, 1)
 
   const row = rows.find((r) => r.id === 'digest-pending')
   assert.ok(row)
   assert.equal(row!.archived, 1)
   const meta = JSON.parse(row!.meta) as { digest_attempts: number }
   assert.equal(meta.digest_attempts, DIGEST_MAX_ATTEMPTS)
+
+  // 再次运行：已超限的归档占位不应被补扫重建，也不应再调用 LLM
+  const again = await runDailyDigest(env, undefined, '2026-09-02')
+  assert.equal(again.processed, 0)
+  assert.equal(llmCalls.length, 1)
+  assert.equal(rows.filter((r) => r.type === 'digest' && r.archived === 0).length, 0)
 })
 
 test('getLatestJob：按 user_id 过滤，避免读他人任务', async () => {

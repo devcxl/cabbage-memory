@@ -99,7 +99,7 @@ export async function createMemory(
         subtype,
         title: input.title || '',
         content: input.content,
-        project_id: input.project_id || '',
+        project_id: normalized.project_id,
         date,
         created_at: now,
       },

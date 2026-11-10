@@ -86,6 +86,7 @@ export async function runDailyDigest(
       } catch (error) {
         failed++
         console.error('[digest] group failed:', error instanceof Error ? error.message : error)
+        await recordDigestFailure(env, group, error)
       }
     }
 
@@ -145,6 +146,18 @@ export async function digestOneGroup(
 
   let existing = await selectExisting()
   if (!existing) {
+    // 已达失败上限的归档占位存在时不再重建，避免「归档 -> 补扫重建 -> 再次失败」无限循环
+    const exhausted = await env.DB.prepare(
+      `SELECT id FROM memories
+       WHERE type = 'digest' AND user_id = ? AND project_id = ? AND date = ?
+         AND archived = 1 AND content = ''
+         AND COALESCE(json_extract(meta, '$.digest_attempts'), 0) >= ?
+       LIMIT 1`,
+    )
+      .bind(userId, projectId, date, DIGEST_MAX_ATTEMPTS)
+      .first<{ id: string }>()
+    if (exhausted) return false
+
     await env.DB.prepare(
       `INSERT OR IGNORE INTO memories (id, user_id, type, subtype, title, content, scope, project_id, date, tags, source, meta, created_at)
        VALUES (?, ?, 'digest', '', ?, '', ?, ?, ?, '[]', 'digest', '{}', ?)`,
