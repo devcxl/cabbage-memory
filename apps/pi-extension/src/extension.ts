@@ -47,7 +47,7 @@ You have a persistent memory service. Use the \`memory\` tool to record and retr
 2. Facts must be atomic: one topic per record. If content covers two regions/projects/subjects, write separate records.
 3. Put high-distinction terms (region, project name, tech stack, person) into both title and content.
 4. Check \`search\` before writing a fact that might already exist; prefer \`update\` over duplicating.
-5. Scope: writes default to the detected project. Pass \`scope: "global"\` for cross-project knowledge.
+5. Scope: writes default to the detected project; \`scope: "global"\` forces global-only. Search/list default to project scope and include global knowledge; use \`all\` to search every project.
 `;
 
 const config = loadPiConfig();
@@ -76,7 +76,7 @@ const scopeSchema = {
   type: "string",
   enum: ["global", "project", "all"],
   description:
-    "Scope: project = current project only, global = cross-project, all = no filter (search/list)",
+    "Scope: project = current project + global (default), global = global only, all = all projects (search/list)",
 } as const;
 
 const addParams = {

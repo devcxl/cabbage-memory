@@ -25,5 +25,5 @@ You have a persistent memory service. Use the \`memory\` tool to record and retr
 2. Facts must be atomic: one topic per record. If content covers two regions/projects/subjects, write separate records — retrieval ranks exact matches first and conflated records cannot be filtered.
 3. Put high-distinction terms (region, project name, tech stack, person) into both title and content.
 4. Check \`search\` before writing a fact that might already exist; prefer \`update\` over duplicating.
-5. Scope: writes default to the detected project. Pass \`scope: "global"\` for cross-project knowledge.
+5. Scope: writes default to the detected project; \`scope: "global"\` forces global-only. Search/list default to project scope and include global knowledge; use \`all\` to search every project.
 `;

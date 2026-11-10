@@ -1,5 +1,9 @@
 import type { MemoryClient } from "@devcxl/cabbage-memory-shared";
-import type { MemoryType, SearchResult } from "@devcxl/cabbage-memory-shared";
+import type {
+  MemoryQueryScope,
+  MemoryType,
+  SearchResult,
+} from "@devcxl/cabbage-memory-shared";
 
 /**
  * memory 工具的执行逻辑（与 OpenCode 插件的 handlers 同一模式）：
@@ -118,14 +122,19 @@ export async function handleSearch(
 ): Promise<string> {
   if (!args.query) return "Error: query is required for search action.";
 
-  // scope=project 限定当前项目；global/all 不过滤（服务端两桶分层已保证精确匹配优先）
-  const projectIdFilter =
-    args.scope === "global" || args.scope === "all" ? undefined : projectId;
+  // project = 当前项目 + 全局（默认）；global = 仅全局；all = 全部项目
+  const scope: MemoryQueryScope =
+    args.scope === "global" || args.scope === "all"
+      ? args.scope
+      : projectId
+        ? "project"
+        : "all";
 
   const results: SearchResult[] = await client.search({
     query: args.query,
     topK: args.max_results,
-    project_id: projectIdFilter || undefined,
+    scope,
+    project_id: scope === "project" ? projectId || undefined : undefined,
   });
 
   if (results.length === 0) return `No memories found for "${args.query}".`;
@@ -180,9 +189,16 @@ export async function handleList(
   projectId: string | null,
 ): Promise<string> {
   const limit = Math.min(args.max_results || 50, 200);
+  const scope: MemoryQueryScope =
+    args.scope === "global" || args.scope === "all"
+      ? args.scope
+      : projectId
+        ? "project"
+        : "all";
   const records = await client.list({
     type: args.type,
-    project_id: (args.scope === "global" ? undefined : projectId) || undefined,
+    scope,
+    project_id: scope === "project" ? projectId || undefined : undefined,
     date: args.date,
     limit,
   });

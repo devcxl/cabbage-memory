@@ -128,7 +128,7 @@ It provides the `memory_add/search/get/update/delete/list` tools and injects the
 | `delete` | Delete one record | `id` |
 | `list` | List recent records | `type`, `date`, `scope` |
 
-`scope`: `project` (current git project) / `global` / `all`.
+`scope`: `project` (current project + global knowledge, default) / `global` (global only) / `all` (all projects).
 
 **Memory types:**
 

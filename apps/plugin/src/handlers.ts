@@ -1,5 +1,8 @@
 import type { MemoryClient } from "./client.js";
-import type { MemoryType } from "@devcxl/cabbage-memory-shared";
+import type {
+  MemoryQueryScope,
+  MemoryType,
+} from "@devcxl/cabbage-memory-shared";
 
 /** 工具入参（OpenCode tool.schema 校验后的形状） */
 export interface ToolArgs {
@@ -13,7 +16,7 @@ export interface ToolArgs {
   max_results?: number;
   date?: string;
   tags?: string;
-  scope?: string;
+  scope?: MemoryQueryScope;
   project_id?: string;
 }
 
@@ -87,8 +90,9 @@ export async function handleAdd(
 
   const type = args.type;
   const subtype = validateSubtypeForType(type, args.subtype);
+  // scope=global 必须覆盖 project_id / 自动探测结果；其余情况写入当前项目（与 pi 扩展一致）
   const effectiveProject =
-    args.project_id ?? (type === "daily" || type === "fact" ? projectId : null);
+    args.scope === "global" ? null : (args.project_id ?? projectId);
 
   const { id } = await client.create({
     type,
@@ -119,20 +123,19 @@ export async function handleSearch(
 ): Promise<string> {
   if (!args.query) return "Error: query is required for search action.";
 
-  // scope=project 限定当前项目；global 只搜全局；all 不传 project 过滤（默认）
-  const projectIdFilter =
-    args.scope === "project"
-      ? projectId
-      : args.scope === "global"
-        ? undefined
-        : args.scope === "all"
-          ? undefined
-          : projectId;
+  // project = 当前项目 + 全局（默认）；global = 仅全局；all = 全部项目
+  const scope: MemoryQueryScope =
+    args.scope === "global" || args.scope === "all"
+      ? args.scope
+      : projectId
+        ? "project"
+        : "all";
 
   const results = await client.search({
     query: args.query,
     topK: args.max_results,
-    project_id: projectIdFilter || undefined,
+    scope,
+    project_id: scope === "project" ? projectId || undefined : undefined,
   });
 
   if (results.length === 0) return `No memories found for "${args.query}".`;
@@ -191,9 +194,16 @@ export async function handleList(
   projectId: string | null,
 ): Promise<string> {
   const limit = Math.min(args.max_results || 50, 200);
+  const scope: MemoryQueryScope =
+    args.scope === "global" || args.scope === "all"
+      ? args.scope
+      : projectId
+        ? "project"
+        : "all";
   const records = await client.list({
     type: args.type,
-    project_id: (args.scope === "global" ? undefined : projectId) || undefined,
+    scope,
+    project_id: scope === "project" ? projectId || undefined : undefined,
     date: args.date,
     limit,
   });

@@ -8,7 +8,7 @@
 
 - **memory 工具**：`memory_add` / `memory_search`（混合搜索，精确匹配优先）/ `memory_get` / `memory_update` / `memory_delete` / `memory_list`
 - **上下文注入**：每次会话开始，自动把服务端组装的记忆上下文（身份 + 偏好 + 规则 + 项目知识 + 最近 digest）注入 system prompt
-- **项目作用域**：自动探测当前 git 项目（owner/repo），`daily`/`fact` 默认挂到当前项目，跨项目知识用 `scope: "global"`
+- **项目作用域**：自动探测当前 git 项目（owner/repo），写入默认挂到当前项目；搜索/列出默认 project（当前项目 + 全局知识），`scope: "global"` 仅全局，`scope: "all"` 全部项目
 
 ## 安装
 

@@ -128,7 +128,7 @@ export OPM_API_KEY="opm_xxx"
 | `delete` | 删除单条 | `id` |
 | `list` | 列出最近记录 | `type`, `date`, `scope` |
 
-`scope`: `project`（当前 git 项目）/ `global`（全局）/ `all`。
+`scope`: `project`（当前项目 + 全局知识，默认）/ `global`（仅全局）/ `all`（全部项目）。
 
 **记忆类型：**
 

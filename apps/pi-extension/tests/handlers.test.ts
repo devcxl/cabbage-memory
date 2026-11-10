@@ -143,3 +143,39 @@ describe("pi 扩展 handlers", () => {
     expect(calls[1].init?.method).toBe("DELETE");
   });
 });
+
+describe("pi 扩展 scope 语义", () => {
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+  });
+
+  test("handleSearch：project/global/all 发送对应 scope", async () => {
+    const calls = mockFetch(() => []);
+
+    await handleSearch(
+      client,
+      { query: "q", scope: "project" },
+      "owner/repo",
+    );
+    await handleSearch(client, { query: "q", scope: "global" }, "owner/repo");
+    await handleSearch(client, { query: "q", scope: "all" }, "owner/repo");
+
+    const bodies = calls.map((c) => JSON.parse(c.init?.body as string));
+    expect(bodies[0].scope).toBe("project");
+    expect(bodies[0].project_id).toBe("owner/repo");
+    expect(bodies[1].scope).toBe("global");
+    expect(bodies[1].project_id).toBeUndefined();
+    expect(bodies[2].scope).toBe("all");
+    expect(bodies[2].project_id).toBeUndefined();
+  });
+
+  test("handleList：scope=global 发送 scope=global 且不带 project_id", async () => {
+    const calls = mockFetch(() => []);
+
+    await handleList(client, { scope: "global" }, "owner/repo");
+
+    const url = new URL(calls[0].url);
+    expect(url.searchParams.get("scope")).toBe("global");
+    expect(url.searchParams.get("project_id")).toBeNull();
+  });
+});

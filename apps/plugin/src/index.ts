@@ -172,7 +172,7 @@ export const MemoryPlugin: Plugin = async (_ctx: PluginInput) => {
             .enum(["global", "project", "all"])
             .optional()
             .describe(
-              "Scope: project = current project only, global = cross-project, all = no filter (search/list)",
+              "Scope: project = current project + global (default), global = global only, all = all projects (search/list)",
             ),
         },
         async execute(args) {
