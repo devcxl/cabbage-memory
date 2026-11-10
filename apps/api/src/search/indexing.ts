@@ -2,6 +2,7 @@ import type { Env, MemoryRecord } from '../types'
 import { EMBEDDING_MODEL, MAX_VECTOR_TOP_K } from '../types'
 import { runAIWithTimeout } from '../utils/ai'
 import { withRetry } from '../utils/retry'
+import { segmentForIndex } from './tokenizer'
 
 interface EmbeddingResponse {
   data: number[][]
@@ -126,6 +127,7 @@ export async function reindexAll(
   indexed: number
   skipped: number
   failed: number
+  ftsUpdated: number
   hasMore: boolean
   nextOffset?: number
 }> {
@@ -133,6 +135,7 @@ export async function reindexAll(
   let indexed = 0
   let skipped = 0
   let failed = 0
+  let ftsUpdated = 0
 
   let currentOffset = opts.offset ?? 0
   const maxLimit = opts.limit
@@ -159,6 +162,25 @@ export async function reindexAll(
 
     const rows = results || []
     if (rows.length === 0) break
+
+    // H1：迁移会把 instructions 的 content_fts 留空（旧分词器产出的 daily/learning 也可能过期）。
+    // reindex 不能只重建向量，必须同步重算 FTS，否则这些记录永远无法被关键词检索命中。
+    const ftsStatements: Array<ReturnType<Env['DB']['prepare']>> = []
+    for (const row of rows) {
+      const contentFts = segmentForIndex(`${row.title || ''} ${row.content}`)
+      if (contentFts === (row.content_fts || '')) continue
+      ftsStatements.push(
+        env.DB.prepare('UPDATE memories SET content_fts = ? WHERE id = ? AND user_id = ?').bind(
+          contentFts,
+          row.id,
+          userId,
+        ),
+      )
+    }
+    if (ftsStatements.length > 0) {
+      await env.DB.batch(ftsStatements)
+      ftsUpdated += ftsStatements.length
+    }
 
     const pending: MemoryRecord[] = opts.force
       ? rows
@@ -194,5 +216,5 @@ export async function reindexAll(
     if (rows.length < fetchLimit) break
   }
 
-  return { total, indexed, skipped, failed, hasMore, nextOffset: hasMore ? currentOffset : undefined }
+  return { total, indexed, skipped, failed, ftsUpdated, hasMore, nextOffset: hasMore ? currentOffset : undefined }
 }
