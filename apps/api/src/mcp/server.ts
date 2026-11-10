@@ -180,7 +180,7 @@ const TOOLS: ToolDef[] = [
     name: 'memory_digest_status',
     description: 'Get latest daily digest cron job status.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    handler: (env) => getLatestJob(env, 'digest'),
+    handler: (env, userId) => getLatestJob(env, 'digest', userId),
   },
 ]
 

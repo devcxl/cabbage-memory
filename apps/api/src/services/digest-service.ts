@@ -16,6 +16,10 @@ import { tzOffsetHours, userYesterday } from '../utils/tz'
 const DIGEST_PLACEHOLDER_TITLE = '__digest_pending__'
 /** 单次 cron 最多补扫的 user×project×date 分组数，避免一次请求超时 */
 export const DIGEST_BACKFILL_LIMIT = 20
+/** 单次 cron 最多重试的未完成 digest 占位数 */
+export const DIGEST_PENDING_LIMIT = 20
+/** 同一占位连续失败多少次后归档，避免永久重试 */
+export const DIGEST_MAX_ATTEMPTS = 5
 
 interface DigestSummary {
   title: string
@@ -39,11 +43,19 @@ export async function runDailyDigest(
     // 1. 重试：上一次未完成的 digest 占位（content 仍为空）
     const pending = await env.DB.prepare(
       `SELECT user_id, project_id, date FROM memories
-       WHERE type = 'digest' AND content = '' AND archived = 0`,
+       WHERE type = 'digest' AND content = '' AND archived = 0
+       ORDER BY created_at ASC LIMIT ?`,
     )
+      .bind(DIGEST_PENDING_LIMIT)
       .all<{ user_id: string; project_id: string; date: string }>()
     for (const row of pending.results || []) {
-      if (await digestOneGroup(env, row.user_id, row.project_id, row.date, ctx)) processed++
+      try {
+        if (await digestOneGroup(env, row.user_id, row.project_id, row.date, ctx)) processed++
+      } catch (error) {
+        failed++
+        console.error('[digest] pending failed:', error instanceof Error ? error.message : error)
+        await recordDigestFailure(env, row, error)
+      }
     }
 
     // 2. 补扫所有漏跑的日期（含昨天），按日期从旧到新，单次最多 DIGEST_BACKFILL_LIMIT 组。
@@ -120,39 +132,64 @@ export async function digestOneGroup(
     return false
   }
 
-  // 2. 幂等占位：唯一索引 (user_id, project_id, date) WHERE type='digest' 兜底
-  let placeholderId = (
-    await env.DB.prepare(
-      `SELECT id FROM memories
+  // 2. 占位/版本：占位行（content=''）复用；已完成的 digest 保留历史，
+  //    新建 active 版本并把旧行归档，source_ids 取并集，避免整条 UPDATE 覆盖旧摘要。
+  type DigestRow = { id: string; content: string; source_ids: string | null }
+  const selectExisting = () =>
+    env.DB.prepare(
+      `SELECT id, content, source_ids FROM memories
        WHERE type = 'digest' AND user_id = ? AND project_id = ? AND date = ? AND archived = 0`,
     )
       .bind(userId, projectId, date)
-      .first<{ id: string }>()
-  )?.id
+      .first<DigestRow>()
 
-  if (!placeholderId) {
-    const insert = await env.DB.prepare(
+  let existing = await selectExisting()
+  if (!existing) {
+    await env.DB.prepare(
       `INSERT OR IGNORE INTO memories (id, user_id, type, subtype, title, content, scope, project_id, date, tags, source, meta, created_at)
        VALUES (?, ?, 'digest', '', ?, '', ?, ?, ?, '[]', 'digest', '{}', ?)`,
     )
       .bind(crypto.randomUUID(), userId, DIGEST_PLACEHOLDER_TITLE, projectId ? 'project' : 'global', projectId, date, Date.now())
       .run()
-    // 冲突（已有占位/正式 digest）时 changes=0，重查拿占位 id 继续走生成流程
-    placeholderId = (
-      await env.DB.prepare(
-        `SELECT id FROM memories WHERE type = 'digest' AND user_id = ? AND project_id = ? AND date = ? AND archived = 0`,
-      )
-        .bind(userId, projectId, date)
-        .first<{ id: string }>()
-    )?.id
-    if (!placeholderId) return false
+    // 冲突（并发占位/并发完成）时重查；若已有正式摘要，走版本化分支
+    existing = await selectExisting()
+    if (!existing) return false
+  }
+
+  let digestId: string
+  let previousSourceIds: string[] = []
+
+  if (existing.content === '') {
+    digestId = existing.id
+    previousSourceIds = parseSourceIds(existing.source_ids)
+  } else {
+    // 已有正式 digest：归档旧版本，新建 active 版本，并写入 supersedes 链路
+    previousSourceIds = parseSourceIds(existing.source_ids)
+    const newId = crypto.randomUUID()
+    const now = Date.now()
+    await env.DB.batch([
+      env.DB.prepare('UPDATE memories SET archived = 1 WHERE id = ? AND user_id = ? AND type = ?').bind(
+        existing.id,
+        userId,
+        'digest',
+      ),
+      env.DB.prepare(
+        `INSERT INTO memories (id, user_id, type, subtype, title, content, scope, project_id, date, tags, source, meta, created_at)
+         VALUES (?, ?, 'digest', '', ?, '', ?, ?, ?, '[]', 'digest', '{}', ?)`,
+      ).bind(newId, userId, DIGEST_PLACEHOLDER_TITLE, projectId ? 'project' : 'global', projectId, date, now),
+      env.DB.prepare(
+        'INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)',
+      ).bind(newId, existing.id, 'supersedes', now),
+    ])
+    digestId = newId
   }
 
   // 3. LLM 总结成单条事实（结构化输出）
   const dailyTexts = dailies.map((d) => `- ${d.content}`).join('\n')
   const summary = await summarize(env, date, dailyTexts)
 
-  // 4. 覆盖占位行为正式内容
+  // 4. 写入当前 active 版本；source_ids 取旧版本与新 daily 的并集
+  const sourceIds = [...new Set([...previousSourceIds, ...dailies.map((d) => d.id)])]
   await env.DB.prepare(
     `UPDATE memories SET title = ?, content = ?, content_fts = ?, tags = ?, source_ids = ?, updated_at = ?
      WHERE id = ? AND user_id = ?`,
@@ -162,15 +199,15 @@ export async function digestOneGroup(
       summary.content,
       segmentForIndex(`${summary.title} ${summary.content}`),
       JSON.stringify(summary.tags || []),
-      JSON.stringify(dailies.map((d) => d.id)),
+      JSON.stringify(sourceIds),
       Date.now(),
-      placeholderId,
+      digestId,
       userId,
     )
     .run()
 
   if (summary.entities?.length) {
-    await setMemoryEntities(env, userId, placeholderId, summary.entities)
+    await setMemoryEntities(env, userId, digestId, summary.entities)
   }
 
   // 5. 标记 daily 已消费
@@ -186,7 +223,7 @@ export async function digestOneGroup(
       indexMemory(
         { env, runAIWithTimeout, withRetry },
         {
-          id: placeholderId,
+          id: digestId,
           user_id: userId,
           type: 'digest',
           subtype: '',
@@ -200,6 +237,41 @@ export async function digestOneGroup(
     )
   }
   return true
+}
+
+function parseSourceIds(raw: string | null): string[] {
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+/** 占位失败：累加 attempts，超过上限后归档，避免无界重试 */
+async function recordDigestFailure(
+  env: Env,
+  row: { user_id: string; project_id: string; date: string },
+  error: unknown,
+): Promise<void> {
+  const message = (error instanceof Error ? error.message : String(error)).slice(0, 500)
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE memories
+       SET meta = json_set(COALESCE(meta, '{}'), '$.digest_attempts',
+         COALESCE(json_extract(meta, '$.digest_attempts'), 0) + 1,
+         '$.last_digest_error', ?)
+       WHERE type = 'digest' AND user_id = ? AND project_id = ? AND date = ?
+         AND content = '' AND archived = 0`,
+    ).bind(message, row.user_id, row.project_id, row.date),
+    env.DB.prepare(
+      `UPDATE memories SET archived = 1
+       WHERE type = 'digest' AND user_id = ? AND project_id = ? AND date = ?
+         AND content = '' AND archived = 0
+         AND COALESCE(json_extract(meta, '$.digest_attempts'), 0) >= ?`,
+    ).bind(row.user_id, row.project_id, row.date, DIGEST_MAX_ATTEMPTS),
+  ])
 }
 
 async function summarize(env: Env, date: string, dailyTexts: string): Promise<DigestSummary> {
@@ -278,11 +350,14 @@ export async function finishJob(
     .run()
 }
 
-export async function getLatestJob(env: Env, job: string): Promise<MemoryRecord | JobRun | null> {
-  const row = await env.DB.prepare(
-    'SELECT * FROM job_runs WHERE job = ? ORDER BY started_at DESC LIMIT 1',
-  )
-    .bind(job)
-    .first<JobRun>()
+export async function getLatestJob(env: Env, job: string, userId?: string): Promise<JobRun | null> {
+  let sql = 'SELECT * FROM job_runs WHERE job = ?'
+  const bindings: string[] = [job]
+  if (userId) {
+    sql += ' AND user_id = ?'
+    bindings.push(userId)
+  }
+  sql += ' ORDER BY started_at DESC LIMIT 1'
+  const row = await env.DB.prepare(sql).bind(...bindings).first<JobRun>()
   return row ?? null
 }

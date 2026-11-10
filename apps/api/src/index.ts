@@ -364,7 +364,8 @@ app.post('/api/digest', async (c) => {
 })
 
 app.get('/api/digest', async (c) => {
-  const status = await getLatestJob(c.env, 'digest')
+  const userId = c.get('userId') as string
+  const status = await getLatestJob(c.env, 'digest', userId)
   return c.json({ success: true, data: status })
 })
 

@@ -1,7 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { validateSubtype, createMemory } from '../src/services/memory-service'
-import { DIGEST_BACKFILL_LIMIT, runDailyDigest } from '../src/services/digest-service'
+import {
+  DIGEST_BACKFILL_LIMIT,
+  DIGEST_MAX_ATTEMPTS,
+  getLatestJob,
+  runDailyDigest,
+} from '../src/services/digest-service'
 import { handleMcpPost } from '../src/mcp/server'
 import { generateApiToken, hashToken } from '../src/auth/tokens'
 import { isAllowed } from '../src/auth/github'
@@ -130,9 +135,14 @@ test('OAuth allowlist：未配置时首位认领，已存在用户正常重复�
 // ── digest 幂等占位 ──
 
 /** 可变存储 mock：覆盖 digest 依赖的 SQL 语句 */
-function createDigestEnv(existing: MemoryRecord[]) {
+function createDigestEnv(existing: MemoryRecord[], opts: { llmError?: boolean } = {}) {
   const rows = [...existing]
-  const digestKeys = new Set<string>()
+  const digestKeys = new Set(
+    existing
+      .filter((r) => r.type === 'digest' && r.archived === 0)
+      .map((r) => `${r.user_id}|${r.project_id}|${r.date}`),
+  )
+  const links: Array<{ from_id: string; to_id: string; relation: string }> = []
   const llmCalls: unknown[] = []
 
   const env = {
@@ -152,12 +162,17 @@ function createDigestEnv(existing: MemoryRecord[]) {
         }
         return stmt
       },
+      async batch(statements: Array<{ run: () => Promise<unknown> }>) {
+        for (const statement of statements) await statement.run()
+        return []
+      },
     } as unknown as Env['DB'],
     VEC: { async upsert() {}, async deleteByIds() {} } as unknown as Env['VEC'],
     AI: {
       async run(_model: string, input: { messages?: unknown[] }) {
         if (Array.isArray(input.messages)) {
           llmCalls.push(input)
+          if (opts.llmError) throw new Error('LLM down')
           return { response: JSON.stringify({ title: '9月1日工作总结', content: '完成华东区销售额统计。', tags: ['销售'], entities: [{ key: 'region', value: '华东' }] }) }
         }
         return { data: [[0.1]] }
@@ -196,6 +211,20 @@ function createDigestEnv(existing: MemoryRecord[]) {
       if (limit !== undefined) result = result.slice(0, limit)
       return result
     }
+    if (sql.includes("type = 'digest'") && sql.includes("content = ''") && sql.includes('SELECT user_id, project_id, date')) {
+      return rows.filter((r) => r.type === 'digest' && r.content === '' && r.archived === 0)
+    }
+    if (sql.includes("type = 'digest'") && sql.includes('SELECT id, content, source_ids FROM memories')) {
+      const [userId, projectId, date] = args as string[]
+      return rows.filter(
+        (r) =>
+          r.type === 'digest' &&
+          r.user_id === userId &&
+          r.project_id === projectId &&
+          r.date === date &&
+          r.archived === 0,
+      )
+    }
     if (sql.includes("type = 'digest'") && sql.includes('SELECT id FROM memories')) {
       const [userId, projectId, date] = args as string[]
       return rows.filter((r) => r.type === 'digest' && r.user_id === userId && r.project_id === projectId && r.date === date && r.archived === 0)
@@ -205,6 +234,23 @@ function createDigestEnv(existing: MemoryRecord[]) {
   }
 
   function exec(sql: string, args: unknown[]): { meta: { changes: number } } {
+    if (sql.includes('INSERT INTO memories') && !sql.includes('INSERT OR IGNORE')) {
+      const [id, userId, , scope, projectId, date] = args as string[]
+      rows.push(
+        makeRecord({
+          id,
+          user_id: userId,
+          type: 'digest',
+          title: '__digest_pending__',
+          content: '',
+          scope: scope as 'global',
+          project_id: projectId,
+          date,
+        }),
+      )
+      digestKeys.add(`${userId}|${projectId}|${date}`)
+      return { meta: { changes: 1 } }
+    }
     if (sql.includes('INSERT OR IGNORE INTO memories')) {
       const [id, userId, , scope, projectId, date] = args as string[]
       const key = `${userId}|${projectId}|${date}`
@@ -239,10 +285,58 @@ function createDigestEnv(existing: MemoryRecord[]) {
       // 记录实体写入（仅计数）
       return { meta: { changes: 1 } }
     }
+    if (sql.includes('INSERT OR IGNORE INTO memory_links')) {
+      const [fromId, toId, relation] = args as string[]
+      links.push({ from_id: fromId, to_id: toId, relation })
+      return { meta: { changes: 1 } }
+    }
+    if (sql.includes('SET meta = json_set') && sql.includes('digest_attempts')) {
+      const [message, userId, projectId, date] = args as string[]
+      const row = rows.find(
+        (r) =>
+          r.type === 'digest' &&
+          r.user_id === userId &&
+          r.project_id === projectId &&
+          r.date === date &&
+          r.content === '' &&
+          r.archived === 0,
+      )
+      if (!row) return { meta: { changes: 0 } }
+      const meta = JSON.parse(row.meta || '{}') as { digest_attempts?: number }
+      meta.digest_attempts = (meta.digest_attempts || 0) + 1
+      row.meta = JSON.stringify({ ...meta, last_digest_error: message })
+      return { meta: { changes: 1 } }
+    }
+    if (sql.includes('SET archived = 1') && sql.includes('digest_attempts')) {
+      const [userId, projectId, date, maxAttempts] = args as unknown[]
+      const row = rows.find(
+        (r) =>
+          r.type === 'digest' &&
+          r.user_id === userId &&
+          r.project_id === projectId &&
+          r.date === date &&
+          r.content === '' &&
+          r.archived === 0,
+      )
+      if (!row) return { meta: { changes: 0 } }
+      const meta = JSON.parse(row.meta || '{}') as { digest_attempts?: number }
+      if ((meta.digest_attempts || 0) < (maxAttempts as number)) return { meta: { changes: 0 } }
+      row.archived = 1
+      digestKeys.delete(`${row.user_id}|${row.project_id}|${row.date}`)
+      return { meta: { changes: 1 } }
+    }
+    if (sql.includes('SET archived = 1') && sql.includes('type = ?') && sql.includes('id = ?')) {
+      const [id, userId, type] = args as string[]
+      const row = rows.find((r) => r.id === id && r.user_id === userId && r.type === type)
+      if (!row) return { meta: { changes: 0 } }
+      row.archived = 1
+      if (row.type === 'digest') digestKeys.delete(`${row.user_id}|${row.project_id}|${row.date}`)
+      return { meta: { changes: 1 } }
+    }
     return { meta: { changes: 0 } }
   }
 
-  return { env, rows, llmCalls }
+  return { env, rows, llmCalls, links }
 }
 
 test('digest：成功生成单条事实并标记 daily 已消费', async () => {
@@ -363,4 +457,91 @@ test('digest：cron 单次补扫有上限', async () => {
   assert.equal(result.processed, DIGEST_BACKFILL_LIMIT)
   assert.equal(dailies.filter((d) => d.digested_at === null).length, 1)
   assert.equal(rows.filter((r) => r.type === 'digest').length, DIGEST_BACKFILL_LIMIT)
+})
+
+test('digest：同日新增 daily 时保留旧摘要并新建版本', async () => {
+  const date = '2026-09-01'
+  const oldDigest = makeRecord({
+    id: 'digest-old',
+    type: 'digest',
+    subtype: '',
+    title: '旧摘要',
+    content: '旧版本摘要',
+    date,
+    source: 'digest',
+    source_ids: JSON.stringify(['d-old']),
+  })
+  const newDaily = makeRecord({ id: 'd-new', type: 'daily', date, content: '新增日志' })
+  const { env, rows, links } = createDigestEnv([oldDigest, newDaily])
+
+  const result = await runDailyDigest(env, undefined, date)
+  assert.equal(result.processed, 1)
+
+  const active = rows.filter((r) => r.type === 'digest' && r.archived === 0)
+  assert.equal(active.length, 1)
+  assert.notEqual(active[0].id, 'digest-old')
+  assert.equal(active[0].content, '完成华东区销售额统计。')
+  assert.deepEqual((JSON.parse(active[0].source_ids || '[]') as string[]).sort(), ['d-new', 'd-old'])
+
+  const old = rows.find((r) => r.id === 'digest-old')
+  assert.ok(old)
+  assert.equal(old!.archived, 1)
+  assert.equal(old!.content, '旧版本摘要')
+  assert.ok(
+    links.some(
+      (l) =>
+        l.from_id === active[0].id &&
+        l.to_id === 'digest-old' &&
+        l.relation === 'supersedes',
+    ),
+  )
+})
+
+test('digest：占位连续失败达到上限后归档', async () => {
+  const date = '2026-09-01'
+  const pending = makeRecord({
+    id: 'digest-pending',
+    type: 'digest',
+    subtype: '',
+    title: '__digest_pending__',
+    content: '',
+    date,
+    source: 'digest',
+    meta: JSON.stringify({ digest_attempts: DIGEST_MAX_ATTEMPTS - 1 }),
+  })
+  const daily = makeRecord({ id: 'd-1', type: 'daily', date, content: '日志' })
+  const { env, rows } = createDigestEnv([pending, daily], { llmError: true })
+
+  // targetDate 指向另一天，避免同一 daily 在补扫阶段再次触发
+  const result = await runDailyDigest(env, undefined, '2026-09-02')
+  assert.equal(result.processed, 0)
+  assert.equal(result.failed, 1)
+
+  const row = rows.find((r) => r.id === 'digest-pending')
+  assert.ok(row)
+  assert.equal(row!.archived, 1)
+  const meta = JSON.parse(row!.meta) as { digest_attempts: number }
+  assert.equal(meta.digest_attempts, DIGEST_MAX_ATTEMPTS)
+})
+
+test('getLatestJob：按 user_id 过滤，避免读他人任务', async () => {
+  const calls: Array<{ sql: string; args: unknown[] }> = []
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...args: unknown[]) {
+            calls.push({ sql, args })
+            return { first: async () => null }
+          },
+        }
+      },
+    } as unknown as Env['DB'],
+  } as Env
+
+  await getLatestJob(env, 'digest', 'u-1')
+
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].sql, /user_id = \?/)
+  assert.deepEqual(calls[0].args, ['digest', 'u-1'])
 })
