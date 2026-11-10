@@ -62,7 +62,7 @@ jobs:
         uses: devcxl/agentic-action@main
         with:
           provider: 'half-cabbage'
-          model: 'deepseek-v4-flash'
+          model: 'deepseek-v4.1-flash'
           thinking: 'high'
           tools: 'read,write'
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -81,7 +81,7 @@ jobs:
         uses: devcxl/agentic-action@main
         with:
           provider: 'half-cabbage'
-          model: 'deepseek-v4-flash'
+          model: 'deepseek-v4.1-flash'
           thinking: 'high'
           tools: 'read,write'
           github_token: ${{ secrets.GITHUB_TOKEN }}
