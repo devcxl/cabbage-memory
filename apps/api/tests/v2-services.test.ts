@@ -545,3 +545,28 @@ test('getLatestJob：按 user_id 过滤，避免读他人任务', async () => {
   assert.match(calls[0].sql, /user_id = \?/)
   assert.deepEqual(calls[0].args, ['digest', 'u-1'])
 })
+
+test('C1：MCP memory_add 拒绝 digest/空 content/非法 date/非法 subtype', async () => {
+  const env = createMockEnv({})
+  const cases = [
+    { type: 'digest', content: 'x' },
+    { type: 'fact', content: '' },
+    { type: 'daily', content: 'x', date: '2026/09/01' },
+    { type: 'fact', subtype: 'rule', content: 'x' },
+  ]
+
+  for (const args of cases) {
+    const res = await handleMcpPost(env, undefined, 'u-1', {
+      jsonrpc: '2.0',
+      id: 99,
+      method: 'tools/call',
+      params: { name: 'memory_add', arguments: args },
+    })
+    const result = res.body?.result as {
+      isError: boolean
+      content: Array<{ text: string }>
+    }
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /Invalid params/)
+  }
+})

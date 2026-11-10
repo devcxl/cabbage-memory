@@ -5,6 +5,8 @@ import { z } from 'zod'
 import type { Env, Variables, MemoryType, ApiResponse, WaitContext } from './types'
 import type { MemoryQueryScope } from '@devcxl/cabbage-memory-shared'
 import { DEFAULT_LIMIT, MAX_LIMIT, CRON_SCHEDULE } from './types'
+import { memoryCreateSchema, memoryUpdateSchema } from './schemas/memory'
+import { ValidationError } from './utils/errors'
 import { authMiddleware } from './auth/middleware'
 import {
   githubLoginUrl,
@@ -76,6 +78,10 @@ app.use('*', async (c, next) => {
 
 app.onError((err, c) => {
   const requestId = c.get('requestId') as string | undefined
+  if (err instanceof ValidationError) {
+    console.error(`[${requestId ?? '-'}] 400 ${c.req.method} ${c.req.path}: ${err.message}`)
+    return c.json({ success: false, error: err.message } satisfies ApiResponse<never>, 400)
+  }
   if (err instanceof HTTPException) {
     const message = err.message || c.req.path
     console.error(`[${requestId ?? '-'}] HTTP ${err.status} ${c.req.method} ${c.req.path}: ${message}`)
@@ -187,24 +193,6 @@ app.delete('/api/tokens/:id', async (c) => {
 })
 
 // ── 记忆 CRUD ──
-
-const memoryCreateSchema = z.object({
-  type: z.enum(['daily', 'fact', 'instruction']),
-  subtype: z.string().max(50).optional(),
-  title: z.string().max(500).optional(),
-  content: z.string().min(1).max(10000),
-  scope: z.enum(['global', 'project']).optional(),
-  project_id: z.string().max(200).optional(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-  tags: z.array(z.string().max(100)).max(20).optional(),
-})
-
-const memoryUpdateSchema = z.object({
-  title: z.string().max(500).optional(),
-  content: z.string().min(1).max(10000).optional(),
-  tags: z.array(z.string().max(100)).max(20).optional(),
-  project_id: z.string().max(200).optional(),
-})
 
 const searchSchema = z.object({
   query: z.string().min(1).max(1000),

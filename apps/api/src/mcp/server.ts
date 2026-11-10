@@ -4,6 +4,7 @@ import { createMemory, listMemories, getMemory, updateMemory, deleteMemory } fro
 import { searchMemories } from '../search/hybrid'
 import { buildContext } from '../services/context-service'
 import { getLatestJob } from '../services/digest-service'
+import { memoryCreateSchema } from '../schemas/memory'
 
 /**
  * MCP Streamable HTTP（无状态）端点。
@@ -91,21 +92,18 @@ const TOOLS: ToolDef[] = [
       required: ['type', 'content'],
       additionalProperties: false,
     },
-    handler: async (env, userId, args, ctx) =>
-      createMemory(
-        env,
-        userId,
-        {
-          type: args.type as MemoryType,
-          subtype: args.subtype ? String(args.subtype) : undefined,
-          title: args.title ? String(args.title) : undefined,
-          content: String(args.content || ''),
-          project_id: args.project_id ? String(args.project_id) : undefined,
-          date: args.date ? String(args.date) : undefined,
-          tags: Array.isArray(args.tags) ? (args.tags as string[]) : undefined,
-        },
-        ctx,
-      ),
+    handler: async (env, userId, args, ctx) => {
+      const parsed = memoryCreateSchema.safeParse(args)
+      if (!parsed.success) {
+        throw new McpError(
+          'INVALID_INPUT',
+          parsed.error.issues
+            .map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+            .join('; '),
+        )
+      }
+      return createMemory(env, userId, parsed.data, ctx)
+    },
   },
   {
     name: 'memory_get',
