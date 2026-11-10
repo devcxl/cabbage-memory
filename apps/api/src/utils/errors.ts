@@ -11,6 +11,14 @@ export const MCP_ERRORS = {
 
 export type McpErrorType = keyof typeof MCP_ERRORS
 
+/** 业务入参错误，API 层映射为 400 */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ValidationError'
+  }
+}
+
 // 自定义错误类，携带结构化的错误码
 export class McpError extends Error {
   code: number

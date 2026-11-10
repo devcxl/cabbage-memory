@@ -7,6 +7,7 @@ import { runAIWithTimeout } from '../utils/ai'
 import { withRetry } from '../utils/retry'
 import { fetchVectorCandidates } from '../search/hybrid'
 import { userLocalDate, tzOffsetHours } from '../utils/tz'
+import { ValidationError } from '../utils/errors'
 import type { MemoryQueryScope } from '@devcxl/cabbage-memory-shared'
 import { projectScopeCondition } from '../search/scope'
 
@@ -19,7 +20,26 @@ export function validateSubtype(type: MemoryType, subtype: string): string {
   if (!subtype) return ''
   if (type === 'instruction' && INSTRUCTION_SUBTYPES.includes(subtype)) return subtype
   if (type === 'fact' && FACT_SUBTYPES.includes(subtype)) return subtype
-  throw new Error(`Invalid subtype "${subtype}" for type "${type}"`)
+  throw new ValidationError(`Invalid subtype "${subtype}" for type "${type}"`)
+}
+
+/**
+ * 统一 scope / project_id 语义：
+ * - global：project_id 必须为空
+ * - project：必须有 project_id
+ * - 未显式指定：按 project_id 是否为空推断
+ */
+export function normalizeScope(
+  scope: 'global' | 'project' | undefined,
+  projectId: string | undefined,
+): { scope: 'global' | 'project'; project_id: string } {
+  const pid = (projectId || '').trim()
+  if (scope === 'project') {
+    if (!pid) throw new ValidationError('project scope requires project_id')
+    return { scope: 'project', project_id: pid }
+  }
+  if (scope === 'global') return { scope: 'global', project_id: '' }
+  return pid ? { scope: 'project', project_id: pid } : { scope: 'global', project_id: '' }
 }
 
 export interface CreateResult {
@@ -36,11 +56,14 @@ export async function createMemory(
   input: CreateMemoryInput,
   executionCtx?: WaitContext,
 ): Promise<CreateResult> {
+  if (input.type === 'digest') {
+    throw new ValidationError('digest type is system-generated')
+  }
   const id = crypto.randomUUID()
   const now = Date.now()
   const subtype = validateSubtype(input.type, input.subtype || '')
-  const scope = input.scope || (input.project_id ? 'project' : 'global')
-  const date = input.date || (input.type === 'daily' || input.type === 'digest'
+  const normalized = normalizeScope(input.scope, input.project_id)
+  const date = input.date || (input.type === 'daily'
     ? userLocalDate(now, tzOffsetHours(env))
     : '')
 
@@ -56,11 +79,11 @@ export async function createMemory(
       input.title || '',
       input.content,
       segmentForIndex(`${input.title || ''} ${input.content}`),
-      scope,
-      input.project_id || '',
+      normalized.scope,
+      normalized.project_id,
       date,
       JSON.stringify(input.tags || []),
-      input.type === 'digest' ? 'digest' : 'agent',
+      'agent',
       '{}',
       now,
     )
@@ -161,7 +184,8 @@ export async function updateMemory(
   const title = input.title ?? existing.title
   const content = input.content ?? existing.content
   const tags = input.tags ? JSON.stringify(input.tags) : existing.tags
-  const projectId = input.project_id ?? existing.project_id
+  const projectId = input.project_id !== undefined ? input.project_id : existing.project_id
+  const normalized = normalizeScope(undefined, projectId)
 
   await env.DB.prepare(
     `UPDATE memories SET title = ?, content = ?, content_fts = ?, tags = ?, project_id = ?, scope = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
@@ -171,8 +195,8 @@ export async function updateMemory(
       content,
       segmentForIndex(`${title} ${content}`),
       tags,
-      projectId,
-      projectId ? 'project' : 'global',
+      normalized.project_id,
+      normalized.scope,
       Date.now(),
       id,
       userId,
@@ -188,7 +212,7 @@ export async function updateMemory(
         subtype: existing.subtype,
         title,
         content,
-        project_id: projectId,
+        project_id: normalized.project_id,
         date: existing.date,
         created_at: existing.created_at,
       }),
