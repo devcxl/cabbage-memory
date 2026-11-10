@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { validateSubtype, createMemory } from '../src/services/memory-service'
-import { runDailyDigest } from '../src/services/digest-service'
+import { DIGEST_BACKFILL_LIMIT, runDailyDigest } from '../src/services/digest-service'
 import { handleMcpPost } from '../src/mcp/server'
 import { generateApiToken, hashToken } from '../src/auth/tokens'
 import { isAllowed } from '../src/auth/github'
@@ -175,10 +175,26 @@ function createDigestEnv(existing: MemoryRecord[]) {
         (r) => r.type === 'daily' && r.user_id === userId && r.project_id === projectId && r.date === date && !r.digested_at && r.archived === 0,
       )
     }
-    // runDailyDigest 的分组查询（GROUP BY user_id, project_id）
+    // runDailyDigest 的分组查询（GROUP BY user_id, project_id, date）
     if (sql.includes("type = 'daily'") && sql.includes('GROUP BY user_id')) {
-      const date = args[0] as string
-      return rows.filter((r) => r.type === 'daily' && r.date === date && !r.digested_at && r.archived === 0)
+      const cutoff = args[0] as string
+      const isBackfill = sql.includes('date <= ?')
+      const limit = sql.includes('LIMIT ?') ? (args[1] as number) : undefined
+      const groups = new Map<string, { user_id: string; project_id: string; date: string }>()
+      for (const r of rows) {
+        if (r.type !== 'daily' || r.archived !== 0 || r.digested_at) continue
+        if (isBackfill ? r.date > cutoff : r.date !== cutoff) continue
+        const key = `${r.user_id}|${r.project_id}|${r.date}`
+        if (!groups.has(key)) groups.set(key, { user_id: r.user_id, project_id: r.project_id, date: r.date })
+      }
+      let result = [...groups.values()].sort(
+        (a, b) =>
+          a.date.localeCompare(b.date) ||
+          a.user_id.localeCompare(b.user_id) ||
+          a.project_id.localeCompare(b.project_id),
+      )
+      if (limit !== undefined) result = result.slice(0, limit)
+      return result
     }
     if (sql.includes("type = 'digest'") && sql.includes('SELECT id FROM memories')) {
       const [userId, projectId, date] = args as string[]
@@ -314,4 +330,37 @@ test('createMemory：AI 未配置时仍完成 D1 写入', async () => {
   assert.ok(result.id)
   assert.equal(inserts.length, 1)
   assert.ok(inserts[0].sql.includes('INSERT INTO memories'))
+})
+
+test('digest：cron 补扫漏跑日期并保持幂等', async () => {
+  const oldDaily = makeRecord({ id: 'd-old', type: 'daily', date: '2026-09-01', content: '旧日志' })
+  const recentDaily = makeRecord({ id: 'd-recent', type: 'daily', date: '2026-09-02', content: '新日志' })
+  const { env, rows } = createDigestEnv([oldDaily, recentDaily])
+
+  const result = await runDailyDigest(env)
+  assert.equal(result.processed, 2)
+  assert.notEqual(oldDaily.digested_at, null)
+  assert.notEqual(recentDaily.digested_at, null)
+  assert.equal(rows.filter((r) => r.type === 'digest').length, 2)
+
+  const again = await runDailyDigest(env)
+  assert.equal(again.processed, 0)
+  assert.equal(rows.filter((r) => r.type === 'digest').length, 2)
+})
+
+test('digest：cron 单次补扫有上限', async () => {
+  const dailies = Array.from({ length: DIGEST_BACKFILL_LIMIT + 1 }, (_, i) =>
+    makeRecord({
+      id: `d-${i}`,
+      type: 'daily',
+      date: `2026-08-${String(i + 1).padStart(2, '0')}`,
+      content: `日志 ${i}`,
+    }),
+  )
+  const { env, rows } = createDigestEnv(dailies)
+
+  const result = await runDailyDigest(env)
+  assert.equal(result.processed, DIGEST_BACKFILL_LIMIT)
+  assert.equal(dailies.filter((d) => d.digested_at === null).length, 1)
+  assert.equal(rows.filter((r) => r.type === 'digest').length, DIGEST_BACKFILL_LIMIT)
 })

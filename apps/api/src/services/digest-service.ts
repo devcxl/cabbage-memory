@@ -14,6 +14,8 @@ import { tzOffsetHours, userYesterday } from '../utils/tz'
  */
 
 const DIGEST_PLACEHOLDER_TITLE = '__digest_pending__'
+/** 单次 cron 最多补扫的 user×project×date 分组数，避免一次请求超时 */
+export const DIGEST_BACKFILL_LIMIT = 20
 
 interface DigestSummary {
   title: string
@@ -28,7 +30,7 @@ export async function runDailyDigest(
   targetDate?: string,
 ): Promise<{ processed: number; failed: number }> {
   const offset = tzOffsetHours(env)
-  const yesterday = targetDate || userYesterday(offset)
+  const runDate = targetDate || userYesterday(offset)
   let processed = 0
   let failed = 0
   const jobId = await startJob(env, 'digest')
@@ -44,26 +46,43 @@ export async function runDailyDigest(
       if (await digestOneGroup(env, row.user_id, row.project_id, row.date, ctx)) processed++
     }
 
-    // 2. 昨天 × 未消费 daily 的 user×project 分组
-    const groups = await env.DB.prepare(
-      `SELECT user_id, project_id, COUNT(*) AS cnt FROM memories
-       WHERE type = 'daily' AND date = ? AND digested_at IS NULL AND archived = 0
-       GROUP BY user_id, project_id`,
-    )
-      .bind(yesterday)
-      .all<{ user_id: string; project_id: string; cnt: number }>()
+    // 2. 补扫所有漏跑的日期（含昨天），按日期从旧到新，单次最多 DIGEST_BACKFILL_LIMIT 组。
+    // 手动指定 targetDate 时只处理该日期，避免误补其他日期。
+    const groups = targetDate
+      ? await env.DB.prepare(
+          `SELECT user_id, project_id, date FROM memories
+           WHERE type = 'daily' AND date = ? AND digested_at IS NULL AND archived = 0
+           GROUP BY user_id, project_id, date
+           ORDER BY user_id, project_id`,
+        )
+          .bind(targetDate)
+          .all<{ user_id: string; project_id: string; date: string }>()
+      : await env.DB.prepare(
+          `SELECT user_id, project_id, date FROM memories
+           WHERE type = 'daily' AND date <= ? AND digested_at IS NULL AND archived = 0
+           GROUP BY user_id, project_id, date
+           ORDER BY date ASC, user_id, project_id
+           LIMIT ?`,
+        )
+          .bind(runDate, DIGEST_BACKFILL_LIMIT)
+          .all<{ user_id: string; project_id: string; date: string }>()
 
     for (const group of groups.results || []) {
       try {
         // false = 占位已被并发执行处理，视为跳过而非失败
-        if (await digestOneGroup(env, group.user_id, group.project_id, yesterday, ctx)) processed++
+        if (await digestOneGroup(env, group.user_id, group.project_id, group.date, ctx)) processed++
       } catch (error) {
         failed++
         console.error('[digest] group failed:', error instanceof Error ? error.message : error)
       }
     }
 
-    await finishJob(env, jobId, 'completed', { processed, failed, date: yesterday })
+    await finishJob(env, jobId, 'completed', {
+      processed,
+      failed,
+      through: runDate,
+      backfillLimit: targetDate ? undefined : DIGEST_BACKFILL_LIMIT,
+    })
     return { processed, failed }
   } catch (error) {
     await finishJob(env, jobId, 'failed', { error: error instanceof Error ? error.message : String(error) })
