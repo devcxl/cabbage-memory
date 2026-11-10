@@ -13,12 +13,13 @@ jobs:
   review:
     name: 自动代码审查 (Pi Agent)
     runs-on: ubuntu-latest
+    # fork PR 不暴露 secrets，也不应让不可信 diff 驱动写权限；直接跳过
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     # 单次审查上限 15 分钟，最多两次尝试，40 分钟留出重试与收尾余量
     timeout-minutes: 40
     permissions:
       contents: read
       pull-requests: write
-      issues: write
 
     steps:
       - name: Checkout Code
@@ -59,7 +60,7 @@ jobs:
         id: pi_review
         continue-on-error: true
         timeout-minutes: 15
-        uses: devcxl/agentic-action@main
+        uses: devcxl/agentic-action@780187f439a3de2584f7f0eeb324f1ab12fae0ce
         with:
           provider: 'half-cabbage'
           model: 'deepseek-v4.1-flash'
@@ -78,7 +79,7 @@ jobs:
         if: hashFiles('review-report.md') == ''
         continue-on-error: true
         timeout-minutes: 15
-        uses: devcxl/agentic-action@main
+        uses: devcxl/agentic-action@780187f439a3de2584f7f0eeb324f1ab12fae0ce
         with:
           provider: 'half-cabbage'
           model: 'deepseek-v4.1-flash'
@@ -106,10 +107,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if ! grep -q "合并前核查清单" review-report.md; then
-            echo "::error::review-report.md 缺少必需的「合并前核查清单」章节，报告不完整，无法回评"
+          if [ ! -s review-report.md ]; then
+            echo "::error::review-report.md 为空，拒绝回评"
             exit 1
           fi
+          SIZE=$(wc -c < review-report.md)
+          if [ "$SIZE" -gt 20000 ]; then
+            echo "::error::review-report.md 过大（${SIZE} bytes），拒绝回评"
+            exit 1
+          fi
+          for SECTION in "总体结论" "合并前核查清单"; do
+            if ! grep -q "$SECTION" review-report.md; then
+              echo "::error::review-report.md 缺少必需章节：$SECTION"
+              exit 1
+            fi
+          done
           PR_NUM="${{ github.event.pull_request.number }}"
           if [ -z "$PR_NUM" ]; then
             echo "No PR number (manual dispatch), skipping comment."
