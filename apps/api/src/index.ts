@@ -3,6 +3,7 @@ import { HTTPException } from 'hono/http-exception'
 import { cors as corsMiddleware } from 'hono/cors'
 import { z } from 'zod'
 import type { Env, Variables, MemoryType, ApiResponse, WaitContext } from './types'
+import type { MemoryQueryScope } from '@devcxl/cabbage-memory-shared'
 import { DEFAULT_LIMIT, MAX_LIMIT, CRON_SCHEDULE } from './types'
 import { authMiddleware } from './auth/middleware'
 import {
@@ -209,6 +210,7 @@ const searchSchema = z.object({
   query: z.string().min(1).max(1000),
   topK: z.number().int().min(1).max(50).optional(),
   type: z.enum(['daily', 'fact', 'instruction', 'digest']).optional(),
+  scope: z.enum(['project', 'global', 'all']).optional(),
   project_id: z.string().max(200).optional(),
   facets: z.record(z.string(), z.string().max(200)).optional(),
 })
@@ -220,9 +222,13 @@ const askSchema = z.object({
 })
 
 function parseListQuery(c: { req: { query: (k: string) => string | undefined } }) {
+  const scopeRaw = c.req.query('scope')
+  const scope: MemoryQueryScope | undefined =
+    scopeRaw === 'project' || scopeRaw === 'global' || scopeRaw === 'all' ? scopeRaw : undefined
   return {
     type: c.req.query('type') as MemoryType | undefined,
     subtype: c.req.query('subtype') || undefined,
+    scope,
     project_id: c.req.query('project_id') || undefined,
     date: c.req.query('date') || undefined,
     limit: Math.min(parseInt(c.req.query('limit') || String(DEFAULT_LIMIT)) || DEFAULT_LIMIT, MAX_LIMIT),
@@ -259,6 +265,7 @@ app.post('/api/memories/search', async (c) => {
     userId,
     topK: parsed.data.topK,
     type: parsed.data.type,
+    scope: parsed.data.scope,
     projectId: parsed.data.project_id,
     facets: parsed.data.facets,
   })

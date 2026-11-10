@@ -7,6 +7,8 @@ import { runAIWithTimeout } from '../utils/ai'
 import { withRetry } from '../utils/retry'
 import { fetchVectorCandidates } from '../search/hybrid'
 import { userLocalDate, tzOffsetHours } from '../utils/tz'
+import type { MemoryQueryScope } from '@devcxl/cabbage-memory-shared'
+import { projectScopeCondition } from '../search/scope'
 
 // ── subtype 校验 ──
 
@@ -93,6 +95,7 @@ export async function createMemory(
 export interface ListOptions {
   type?: MemoryType
   subtype?: string
+  scope?: MemoryQueryScope
   project_id?: string
   date?: string
   limit?: number
@@ -100,7 +103,7 @@ export interface ListOptions {
 }
 
 export async function listMemories(env: Env, userId: string, opts: ListOptions = {}): Promise<MemoryRecord[]> {
-  const { type, subtype, project_id, date, limit = DEFAULT_LIMIT, offset = 0 } = opts
+  const { type, subtype, scope, project_id, date, limit = DEFAULT_LIMIT, offset = 0 } = opts
 
   const conditions: string[] = ['user_id = ?', 'archived = 0']
   const bindings: unknown[] = [userId]
@@ -112,9 +115,10 @@ export async function listMemories(env: Env, userId: string, opts: ListOptions =
     conditions.push('subtype = ?')
     bindings.push(subtype)
   }
-  if (project_id) {
-    conditions.push('project_id = ?')
-    bindings.push(project_id)
+  const scopeCond = projectScopeCondition(scope, project_id)
+  if (scopeCond.sql) {
+    conditions.push(scopeCond.sql.slice(' AND '.length))
+    bindings.push(...scopeCond.bindings)
   }
   if (date) {
     conditions.push('date = ?')
@@ -272,26 +276,57 @@ export async function postProcessFact(env: Env, userId: string, id: string, cont
   const parsed = extractJson<FactPostProcessResult>(response)
   if (!parsed) return
 
-  if (parsed.entities?.length) {
-    await setMemoryEntities(env, userId, id, parsed.entities)
-  }
-  if (parsed.duplicate_of) {
-    await env.DB.prepare('UPDATE memories SET archived = 1 WHERE id = ? AND user_id = ?')
-      .bind(id, userId)
-      .run()
+  // LLM 输出只能操作本次向量召回候选集内的 fact；禁止自指、跨类型或任意 id。
+  const relatedIds = new Set(related.map((r) => r.id).filter((rid) => rid !== id))
+  const duplicateOf =
+    typeof parsed.duplicate_of === 'string' && relatedIds.has(parsed.duplicate_of)
+      ? parsed.duplicate_of
+      : null
+  const supersedes = [...new Set(parsed.supersedes || [])].filter((oldId) => relatedIds.has(oldId))
+  const contradicts = [...new Set(parsed.contradicts || [])].filter((oldId) => relatedIds.has(oldId))
+
+  const statements: Array<ReturnType<Env['DB']['prepare']>> = []
+  const link = (toId: string, relation: string) =>
+    env.DB.prepare(
+      'INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)',
+    ).bind(id, toId, relation, Date.now())
+
+  if (duplicateOf) {
+    // 重复事实：保留 derived_from 追溯链，归档新事实，不写实体
+    statements.push(link(duplicateOf, 'derived_from'))
+    statements.push(
+      env.DB.prepare('UPDATE memories SET archived = 1 WHERE id = ? AND user_id = ? AND type = ?')
+        .bind(id, userId, 'fact'),
+    )
+    await env.DB.batch(statements)
     await deleteMemoryIndex(env, id)
     return
   }
-  for (const oldId of parsed.supersedes || []) {
-    await insertLink(env, id, oldId, 'supersedes')
-    await env.DB.prepare('UPDATE memories SET archived = 1 WHERE id = ? AND user_id = ? AND id != ?')
-      .bind(oldId, userId, id)
-      .run()
-    await deleteMemoryIndex(env, oldId)
+
+  for (const oldId of supersedes) {
+    statements.push(link(oldId, 'supersedes'))
+    statements.push(
+      env.DB.prepare(
+        'UPDATE memories SET archived = 1 WHERE id = ? AND user_id = ? AND type = ? AND id != ?',
+      ).bind(oldId, userId, 'fact', id),
+    )
   }
-  for (const oldId of parsed.contradicts || []) {
-    await insertLink(env, id, oldId, 'contradicts')
+  for (const oldId of contradicts) {
+    statements.push(link(oldId, 'contradicts'))
   }
+  if (parsed.entities?.length) {
+    statements.push(env.DB.prepare('DELETE FROM memory_entities WHERE memory_id = ?').bind(id))
+    for (const e of parsed.entities) {
+      if (!e.key || !e.value) continue
+      statements.push(
+        env.DB.prepare(
+          'INSERT OR IGNORE INTO memory_entities (memory_id, user_id, key, value) VALUES (?, ?, ?, ?)',
+        ).bind(id, userId, e.key.trim().toLowerCase(), e.value.trim()),
+      )
+    }
+  }
+  if (statements.length > 0) await env.DB.batch(statements)
+  for (const oldId of supersedes) await deleteMemoryIndex(env, oldId)
 }
 
 export async function setMemoryEntities(
@@ -309,14 +344,6 @@ export async function setMemoryEntities(
       .bind(memoryId, userId, e.key.trim().toLowerCase(), e.value.trim())
       .run()
   }
-}
-
-async function insertLink(env: Env, fromId: string, toId: string, relation: string): Promise<void> {
-  await env.DB.prepare(
-    'INSERT OR IGNORE INTO memory_links (from_id, to_id, relation, created_at) VALUES (?, ?, ?, ?)',
-  )
-    .bind(fromId, toId, relation, Date.now())
-    .run()
 }
 
 /** 从 LLM 响应中提取 JSON（兼容裸 JSON 与 ```json 包裹） */

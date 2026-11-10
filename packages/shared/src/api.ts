@@ -1,4 +1,4 @@
-import type { MemoryType } from "./schema";
+import type { MemoryQueryScope, MemoryType } from "./schema";
 
 /** Worker API 统一响应格式 */
 export interface ApiResponse<T> {
@@ -78,6 +78,7 @@ export interface UpdateMemoryInput {
 export interface ListMemoriesQuery {
   type?: MemoryType;
   subtype?: string;
+  scope?: MemoryQueryScope;
   project_id?: string;
   date?: string;
   limit?: number;
@@ -89,6 +90,7 @@ export interface SearchRequest {
   query: string;
   topK?: number;
   type?: MemoryType;
+  scope?: MemoryQueryScope;
   project_id?: string;
   /** 分面硬过滤，如 { region: '华北' }（可选，第二阶段查询解析产出） */
   facets?: Record<string, string>;

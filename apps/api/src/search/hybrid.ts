@@ -1,8 +1,10 @@
 import type { Env, MemoryRecord, MemoryType, SearchResult } from '../types'
+import type { MemoryQueryScope } from '@devcxl/cabbage-memory-shared'
 import { MAX_VECTOR_TOP_K } from '../types'
 import { preprocessQuery, buildFtsMatchExpression, type ProcessedQuery } from './tokenizer'
 import { runAIWithTimeout } from '../utils/ai'
 import { EMBEDDING_MODEL } from '../types'
+import { projectFilterValues, projectScopeCondition } from './scope'
 
 /**
  * 两桶分层混合搜索：
@@ -20,6 +22,7 @@ interface SearchOptions {
   userId: string
   topK?: number
   type?: MemoryType
+  scope?: MemoryQueryScope
   projectId?: string
   facets?: Record<string, string>
 }
@@ -38,7 +41,7 @@ interface Candidate {
 }
 
 export async function searchMemories(env: Env, opts: SearchOptions): Promise<SearchResult[]> {
-  const { query, userId, type, projectId, facets } = opts
+  const { query, userId, type, scope, projectId, facets } = opts
   const topK = Math.min(Math.max(opts.topK ?? 8, 1), MAX_VECTOR_TOP_K)
 
   const processed = preprocessQuery(query)
@@ -46,9 +49,13 @@ export async function searchMemories(env: Env, opts: SearchOptions): Promise<Sea
 
   // 并行：FTS AND（桶 A）+ FTS OR（桶 B 候选）+ 向量召回
   const [andRows, orRows, vecIds] = await Promise.all([
-    hasFts ? ftsQuery(env, { processed, userId, type, mode: 'AND', limit: topK * 3 }) : [],
-    hasFts ? ftsQuery(env, { processed, userId, type, mode: 'OR', limit: topK * 4 }) : [],
-    vectorCandidateIds(env, { query, userId, type, projectId, topK }),
+    hasFts
+      ? ftsQuery(env, { processed, userId, type, scope, projectId, mode: 'AND', limit: topK * 3 })
+      : [],
+    hasFts
+      ? ftsQuery(env, { processed, userId, type, scope, projectId, mode: 'OR', limit: topK * 4 })
+      : [],
+    vectorCandidateIds(env, { query, userId, type, scope, projectId, topK }),
   ])
 
   const andIds = new Set(andRows.map((r) => r.id))
@@ -81,7 +88,7 @@ export async function searchMemories(env: Env, opts: SearchOptions): Promise<Sea
   let allowedIds: Set<string> | null = null
   let allowedExtra: string[] = []
   if (facets && Object.keys(facets).length > 0) {
-    allowedIds = await filterIdsByFacets(env, userId, facets)
+    allowedIds = await filterIdsByFacets(env, userId, facets, scope, projectId)
     allowedExtra = [...allowedIds].filter((id) => !candidates.some((c) => c.id === id))
     for (const id of allowedExtra) {
       candidates.push({ id, bucket: 'fused', score: 0, snippet: '' })
@@ -102,7 +109,7 @@ export async function searchMemories(env: Env, opts: SearchOptions): Promise<Sea
   })
   const topCandidates = eligibleCandidates.slice(0, topK)
 
-  const records = await hydrate(env, userId, topCandidates.map((c) => c.id))
+  const records = await hydrate(env, userId, topCandidates.map((c) => c.id), scope, projectId)
   const recordMap = new Map(records.map((r) => [r.id, r]))
 
   const results: SearchResult[] = []
@@ -118,7 +125,15 @@ export async function searchMemories(env: Env, opts: SearchOptions): Promise<Sea
 
 async function ftsQuery(
   env: Env,
-  args: { processed: ProcessedQuery; userId: string; type?: MemoryType; mode: 'AND' | 'OR'; limit: number },
+  args: {
+    processed: ProcessedQuery
+    userId: string
+    type?: MemoryType
+    scope?: MemoryQueryScope
+    projectId?: string
+    mode: 'AND' | 'OR'
+    limit: number
+  },
 ): Promise<FtsRow[]> {
   const matchExpr = buildFtsMatchExpression(args.processed.tokens, args.mode)
   if (!matchExpr) return []
@@ -133,6 +148,9 @@ async function ftsQuery(
     sql += ' AND type = ?'
     bindings.push(args.type)
   }
+  const scopeCond = projectScopeCondition(args.scope, args.projectId)
+  sql += scopeCond.sql
+  bindings.push(...scopeCond.bindings)
   sql += ')'
   sql += ' ORDER BY rank ASC LIMIT ?'
   bindings.push(args.limit)
@@ -155,25 +173,61 @@ interface VectorMatch {
 
 export async function vectorCandidateIds(
   env: Env,
-  args: { query: string; userId: string; type?: MemoryType; projectId?: string; topK: number },
+  args: {
+    query: string
+    userId: string
+    type?: MemoryType
+    scope?: MemoryQueryScope
+    projectId?: string
+    topK: number
+  },
 ): Promise<string[]> {
   if (!env.AI || !env.VEC) return []
+  const ai = env.AI
+  const vec = env.VEC
 
   try {
-    const embedding = await runAIWithTimeout<{ data: number[][] }>(env.AI, EMBEDDING_MODEL, {
+    const embedding = await runAIWithTimeout<{ data: number[][] }>(ai, EMBEDDING_MODEL, {
       text: args.query,
     })
 
-    const filter: Record<string, string> = { user_id: args.userId }
-    if (args.type) filter.type = args.type
-    if (args.projectId) filter.project_id = args.projectId
+    const baseFilter: Record<string, string> = { user_id: args.userId }
+    if (args.type) baseFilter.type = args.type
 
-    const response = await env.VEC.query(embedding.data[0], {
-      topK: Math.min(args.topK, MAX_VECTOR_TOP_K),
-      filter,
-      returnMetadata: 'none',
-    })
-    return ((response.matches || []) as VectorMatch[]).map((m) => m.id)
+    // project scope 需要同时召回当前项目和全局记忆；Vectorize 不支持 OR，分两次查后合并。
+    const projectValues = projectFilterValues(args.scope, args.projectId)
+    const filters =
+      projectValues.length > 0
+        ? projectValues.map((value) => ({ ...baseFilter, project_id: value }))
+        : [baseFilter]
+
+    const settled = await Promise.allSettled(
+      filters.map((filter) =>
+        vec.query(embedding.data[0], {
+          topK: Math.min(args.topK, MAX_VECTOR_TOP_K),
+          filter,
+          returnMetadata: 'none',
+        }),
+      ),
+    )
+
+    const ids: string[] = []
+    const seen = new Set<string>()
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        console.error(
+          '[vector] query failed:',
+          result.reason instanceof Error ? result.reason.message : result.reason,
+        )
+        continue
+      }
+      for (const match of (result.value.matches || []) as VectorMatch[]) {
+        if (seen.has(match.id)) continue
+        seen.add(match.id)
+        ids.push(match.id)
+      }
+    }
+    return ids.slice(0, args.topK)
   } catch (error) {
     console.error('[vector] query failed:', error instanceof Error ? error.message : error)
     return []
@@ -192,7 +246,7 @@ export async function fetchVectorCandidates(
     const placeholders = ids.map(() => '?').join(',')
     const { results } = await env.DB.prepare(
       `SELECT id, title, content FROM memories
-       WHERE id IN (${placeholders}) AND user_id = ? AND archived = 0`,
+       WHERE id IN (${placeholders}) AND user_id = ? AND archived = 0 AND type = 'fact'`,
     )
       .bind(...ids, args.userId)
       .all<Pick<MemoryRecord, 'id' | 'title' | 'content'>>()
@@ -206,21 +260,29 @@ export async function fetchVectorCandidates(
 // ── 分面过滤 ──
 
 /** 返回同时匹配全部分面的记忆 id 集合 */
-async function filterIdsByFacets(env: Env, userId: string, facets: Record<string, string>): Promise<Set<string>> {
+async function filterIdsByFacets(
+  env: Env,
+  userId: string,
+  facets: Record<string, string>,
+  scope?: MemoryQueryScope,
+  projectId?: string,
+): Promise<Set<string>> {
   const entries = Object.entries(facets).filter(([k, v]) => k && v)
   if (entries.length === 0) return new Set()
 
-  const keyConditions = entries.map(() => '(key = ? AND value = ?)').join(' OR ')
+  const keyConditions = entries.map(() => '(e.key = ? AND e.value = ?)').join(' OR ')
   const bindings: string[] = [userId]
   for (const [k, v] of entries) {
     bindings.push(k.trim().toLowerCase(), v.trim())
   }
+  const scopeCond = projectScopeCondition(scope, projectId, 'm.project_id')
 
   const { results } = await env.DB.prepare(
-    `SELECT memory_id, key, value FROM memory_entities
-     WHERE user_id = ? AND (${keyConditions})`,
+    `SELECT e.memory_id, e.key, e.value FROM memory_entities e
+     JOIN memories m ON m.id = e.memory_id AND m.user_id = e.user_id
+     WHERE e.user_id = ? AND m.archived = 0 AND (${keyConditions})${scopeCond.sql}`,
   )
-    .bind(...bindings)
+    .bind(...bindings, ...scopeCond.bindings)
     .all<{ memory_id: string; key: string; value: string }>()
 
   // 按 memory_id 分组，校验每个分面都有命中
@@ -251,16 +313,23 @@ function rrf(...rankedLists: string[][]): Map<string, number> {
   return scores
 }
 
-async function hydrate(env: Env, userId: string, ids: string[]): Promise<MemoryRecord[]> {
+async function hydrate(
+  env: Env,
+  userId: string,
+  ids: string[],
+  scope?: MemoryQueryScope,
+  projectId?: string,
+): Promise<MemoryRecord[]> {
   if (ids.length === 0) return []
   const placeholders = ids.map(() => '?').join(',')
+  const scopeCond = projectScopeCondition(scope, projectId)
   const { results } = await env.DB.prepare(
     `SELECT id, user_id, type, subtype, title, content, scope, project_id, date, tags, source, source_ids, meta,
             created_at, updated_at, digested_at, archived
      FROM memories
-     WHERE id IN (${placeholders}) AND user_id = ? AND archived = 0`,
+     WHERE id IN (${placeholders}) AND user_id = ? AND archived = 0${scopeCond.sql}`,
   )
-    .bind(...ids, userId)
+    .bind(...ids, userId, ...scopeCond.bindings)
     .all<MemoryRecord>()
   return results || []
 }

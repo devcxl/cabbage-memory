@@ -82,6 +82,7 @@ export class MemoryClient {
     return this.query("/api/memories", {
       type: query.type,
       subtype: query.subtype,
+      scope: query.scope,
       project_id: query.project_id,
       date: query.date,
       limit: query.limit,

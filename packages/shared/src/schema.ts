@@ -14,6 +14,9 @@ export type InstructionSubtype = (typeof INSTRUCTION_SUBTYPES)[number];
 export const FACT_SUBTYPES = ["preference", "episodic", "knowledge"] as const;
 export type FactSubtype = (typeof FACT_SUBTYPES)[number];
 
+/** 查询作用域：project = 当前项目 + 全局；global = 仅全局；all = 全部项目 */
+export type MemoryQueryScope = "project" | "global" | "all";
+
 /** 记忆来源：agent（编码代理写入）| user（人工写入）| digest（定时总结产出）| system（系统） */
 export const MEMORY_SOURCES = ["agent", "user", "digest", "system"] as const;
 export type MemorySource = (typeof MEMORY_SOURCES)[number];
